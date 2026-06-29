@@ -41,9 +41,14 @@ export function buildServer(gateway) {
     res.status(400).json({ error: err.message });
   });
 
-  // GET /qr → connection status + QR PNG data url + connected jid.
+  // GET /qr → connection status + QR PNG data url + connected jid. If the session has given up /
+  // disconnected (an unscanned QR expired), revive it so opening the connect page regenerates a QR.
   app.get('/qr', wrap((_req, res) => {
-    const s = gateway.getState();
+    let s = gateway.getState();
+    if (contractStatus(s.status) === 'disconnected' && typeof gateway.revive === 'function') {
+      gateway.revive();
+      s = gateway.getState();
+    }
     res.json({
       status: contractStatus(s.status),
       qrDataUrl: s.qrDataUrl ?? null,

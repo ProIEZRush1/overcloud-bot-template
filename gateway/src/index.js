@@ -202,6 +202,19 @@ async function onMessagesUpsert({ messages, type }) {
 const gateway = {
   getState: () => ({ status: state.status, qrDataUrl: state.qrDataUrl, me: state.me }),
   isConnected: () => state.status === 'connected' && !!sock,
+  // Revive a session that gave up / logged out so opening the connect page ALWAYS regenerates a fresh
+  // QR on demand (an unscanned QR expires after a few refreshes and Baileys stops — without this the
+  // page would show "Desconectado" forever until a redeploy). No-op while connected or already trying.
+  revive() {
+    if (state.status === 'connected' || state.status === 'connecting' || state.status === 'qr_pending') {
+      return;
+    }
+    reconnectAttempts = 0;
+    clearTimeout(reconnectTimer);
+    state.status = 'connecting';
+    logger.info('revive: regenerating QR on demand');
+    connect().catch((e) => logger.error({ err: e.message }, 'revive failed'));
+  },
   async send(to, text) {
     if (!gateway.isConnected()) throw new Error('not connected');
     const result = await sock.sendMessage(toJid(to), { text });

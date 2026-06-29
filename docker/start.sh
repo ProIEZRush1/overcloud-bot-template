@@ -20,14 +20,20 @@ for V in DB_CONNECTION DB_HOST DB_PORT DB_DATABASE DB_USERNAME DB_PASSWORD APP_U
     printf '%s=%s\n' "$V" "$VAL" >> .env
 done
 
-# 2. Ensure a valid APP_KEY and export it. Read the base64 line SPECIFICALLY (an empty
-#    `APP_KEY=` line from .env.production must never win) and generate one if absent.
-KEYLINE="$(grep '^APP_KEY=base64:' .env 2>/dev/null | head -1)"
-if [ -z "$KEYLINE" ]; then
-    php artisan key:generate --force || true
-    KEYLINE="$(grep '^APP_KEY=base64:' .env 2>/dev/null | head -1)"
+# 2. Ensure a REAL base64 APP_KEY lives in .env (an empty APP_KEY makes config:cache bake app.key=''
+#    → 500 on every authenticated route). Try artisan first; if it didn't persist one (it has silently
+#    failed at boot), write one directly with /dev/urandom so this is bulletproof and never depends on
+#    a working bootstrap.
+if ! grep -q '^APP_KEY=base64:' .env 2>/dev/null; then
+    php artisan key:generate --force 2>&1 | tail -1 || true
 fi
-export APP_KEY="$(printf '%s' "$KEYLINE" | cut -d '=' -f2-)"
+if ! grep -q '^APP_KEY=base64:' .env 2>/dev/null; then
+    NEWKEY="base64:$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
+    grep -v '^APP_KEY=' .env > .env.tmp 2>/dev/null && mv .env.tmp .env
+    printf 'APP_KEY=%s\n' "$NEWKEY" >> .env
+    echo "[entrypoint] APP_KEY written via /dev/urandom fallback"
+fi
+export APP_KEY="$(grep '^APP_KEY=base64:' .env | head -1 | cut -d '=' -f2-)"
 
 # 3. Ensure the SQLite database file and its directory exist (default path).
 DB_DATABASE="${DB_DATABASE:-/app/database/database.sqlite}"
@@ -76,11 +82,14 @@ chmod -R ug+rwX storage bootstrap/cache "$DB_DIR" 2>/dev/null || true
 #    back to the .env sqlite default (empty → "no such table: users") while the CLI used Postgres.
 #    This runs AFTER the env-sync (1b) and the APP_KEY export (2), so the cache bakes the real Postgres
 #    creds + a real APP_KEY (caching with an empty exported key is what used to 500 every route).
-#    Verify the baked key is non-empty; if anything went wrong, fall back to clearing so routes still load.
+#    If the baked key is somehow empty, regenerate + re-cache — NEVER config:clear (an un-cached web
+#    request mis-resolves .env → sqlite → 500, which is exactly the bug we're avoiding).
 php artisan config:cache 2>&1 | tail -1
 if [ "$(php artisan tinker --execute='echo strlen(config("app.key"));' 2>/dev/null | tail -1)" = "0" ]; then
-    echo "[entrypoint] baked APP_KEY empty — falling back to config:clear"
-    php artisan config:clear || true
+    echo "[entrypoint] baked APP_KEY empty — regenerating + re-caching"
+    php artisan key:generate --force 2>&1 | tail -1
+    export APP_KEY="$(grep '^APP_KEY=base64:' .env | head -1 | cut -d '=' -f2-)"
+    php artisan config:cache 2>&1 | tail -1
 fi
 
 # 7. Serve under an auto-respawn loop: if a request ever crashes the dev server, it restarts
